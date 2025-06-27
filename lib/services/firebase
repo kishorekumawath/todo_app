@@ -1,0 +1,356 @@
+import 'package:cloud_firestore.dart';
+import 'package:firebase_auth.dart';
+import '../models/task_model.dart';
+import '../models/user_model.dart';
+import '../models/shared_task_model.dart';
+
+class FirebaseService {
+  static final FirebaseService _instance = FirebaseService._internal();
+  factory FirebaseService() => _instance;
+  FirebaseService._internal();
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  // Collections
+  CollectionReference get _usersCollection => _firestore.collection('users');
+  CollectionReference get _tasksCollection => _firestore.collection('tasks');
+  CollectionReference get _sharedTasksCollection => _firestore.collection('shared_tasks');
+
+  // Current user
+  User? get currentUser => _auth.currentUser;
+  String? get currentUserId => _auth.currentUser?.uid;
+
+  // Authentication
+  Future<UserCredential?> signInWithEmailAndPassword(String email, String password) async {
+    try {
+      final credential = await _auth.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+      if (credential.user != null) {
+        await _updateUserOnlineStatus(credential.user!.uid, true);
+      }
+      return credential;
+    } catch (e) {
+      throw Exception('Failed to sign in: $e');
+    }
+  }
+
+  Future<UserCredential?> createUserWithEmailAndPassword(String email, String password, String name) async {
+    try {
+      final credential = await _auth.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+      
+      if (credential.user != null) {
+        // Create user document
+        await createUser(UserModel(
+          id: credential.user!.uid,
+          email: email,
+          name: name,
+          createdAt: DateTime.now(),
+          lastSeen: DateTime.now(),
+          isOnline: true,
+        ));
+      }
+      
+      return credential;
+    } catch (e) {
+      throw Exception('Failed to create account: $e');
+    }
+  }
+
+  Future<void> signOut() async {
+    if (currentUserId != null) {
+      await _updateUserOnlineStatus(currentUserId!, false);
+    }
+    await _auth.signOut();
+  }
+
+  // User operations
+  Future<void> createUser(UserModel user) async {
+    try {
+      await _usersCollection.doc(user.id).set(user.toFirestore());
+    } catch (e) {
+      throw Exception('Failed to create user: $e');
+    }
+  }
+
+  Future<UserModel?> getUser(String userId) async {
+    try {
+      final doc = await _usersCollection.doc(userId).get();
+      if (doc.exists) {
+        return UserModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      throw Exception('Failed to get user: $e');
+    }
+  }
+
+  Future<UserModel?> getUserByEmail(String email) async {
+    try {
+      final query = await _usersCollection.where('email', isEqualTo: email).get();
+      if (query.docs.isNotEmpty) {
+        return UserModel.fromFirestore(query.docs.first);
+      }
+      return null;
+    } catch (e) {
+      throw Exception('Failed to get user by email: $e');
+    }
+  }
+
+  Future<void> _updateUserOnlineStatus(String userId, bool isOnline) async {
+    try {
+      await _usersCollection.doc(userId).update({
+        'isOnline': isOnline,
+        'lastSeen': Timestamp.now(),
+      });
+    } catch (e) {
+      // Silently fail for online status updates
+    }
+  }
+
+  // Task operations
+  Future<String> createTask(TaskModel task) async {
+    try {
+      final docRef = await _tasksCollection.add(task.toFirestore());
+      return docRef.id;
+    } catch (e) {
+      throw Exception('Failed to create task: $e');
+    }
+  }
+
+  Future<void> updateTask(TaskModel task) async {
+    try {
+      await _tasksCollection.doc(task.id).update(task.toFirestore());
+    } catch (e) {
+      throw Exception('Failed to update task: $e');
+    }
+  }
+
+  Future<void> deleteTask(String taskId) async {
+    try {
+      // Delete task
+      await _tasksCollection.doc(taskId).delete();
+      
+      // Delete related shared tasks
+      final sharedTasks = await _sharedTasksCollection
+          .where('taskId', isEqualTo: taskId)
+          .get();
+      
+      for (final doc in sharedTasks.docs) {
+        await doc.reference.delete();
+      }
+    } catch (e) {
+      throw Exception('Failed to delete task: $e');
+    }
+  }
+
+  Future<TaskModel?> getTask(String taskId) async {
+    try {
+      final doc = await _tasksCollection.doc(taskId).get();
+      if (doc.exists) {
+        return TaskModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      throw Exception('Failed to get task: $e');
+    }
+  }
+
+  // Get tasks stream for real-time updates
+  Stream<List<TaskModel>> getTasksStream(String userId) {
+    return _tasksCollection
+        .where('ownerId', isEqualTo: userId)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => TaskModel.fromFirestore(doc))
+            .toList());
+  }
+
+  // Get shared tasks stream
+  Stream<List<TaskModel>> getSharedTasksStream(String userId) {
+    return _tasksCollection
+        .where('sharedWith', arrayContains: userId)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => TaskModel.fromFirestore(doc))
+            .toList());
+  }
+
+  // Get paginated tasks
+  Future<List<TaskModel>> getPaginatedTasks(String userId, {DocumentSnapshot? lastDocument, int limit = 20}) async {
+    try {
+      Query query = _tasksCollection
+          .where('ownerId', isEqualTo: userId)
+          .orderBy('createdAt', descending: true)
+          .limit(limit);
+
+      if (lastDocument != null) {
+        query = query.startAfterDocument(lastDocument);
+      }
+
+      final snapshot = await query.get();
+      return snapshot.docs.map((doc) => TaskModel.fromFirestore(doc)).toList();
+    } catch (e) {
+      throw Exception('Failed to get paginated tasks: $e');
+    }
+  }
+
+  // Sharing operations
+  Future<String> shareTask(SharedTaskModel sharedTask) async {
+    try {
+      final docRef = await _sharedTasksCollection.add(sharedTask.toFirestore());
+      return docRef.id;
+    } catch (e) {
+      throw Exception('Failed to share task: $e');
+    }
+  }
+
+  Future<void> respondToTaskShare(String shareId, ShareStatus status) async {
+    try {
+      final updateData = {
+        'status': status.name,
+        'respondedAt': Timestamp.now(),
+      };
+
+      await _sharedTasksCollection.doc(shareId).update(updateData);
+
+      // If accepted, add user to task's sharedWith array
+      if (status == ShareStatus.accepted) {
+        final sharedTask = await getSharedTask(shareId);
+        if (sharedTask != null && sharedTask.sharedWithId != null) {
+          await _tasksCollection.doc(sharedTask.taskId).update({
+            'sharedWith': FieldValue.arrayUnion([sharedTask.sharedWithId!])
+          });
+        }
+      }
+    } catch (e) {
+      throw Exception('Failed to respond to task share: $e');
+    }
+  }
+
+  Future<SharedTaskModel?> getSharedTask(String shareId) async {
+    try {
+      final doc = await _sharedTasksCollection.doc(shareId).get();
+      if (doc.exists) {
+        return SharedTaskModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      throw Exception('Failed to get shared task: $e');
+    }
+  }
+
+  // Get pending task shares for a user
+  Stream<List<SharedTaskModel>> getPendingTaskSharesStream(String userEmail) {
+    return _sharedTasksCollection
+        .where('sharedWithEmail', isEqualTo: userEmail)
+        .where('status', isEqualTo: 'pending')
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => SharedTaskModel.fromFirestore(doc))
+            .toList());
+  }
+
+  // Get task shares created by user
+  Stream<List<SharedTaskModel>> getCreatedTaskSharesStream(String userId) {
+    return _sharedTasksCollection
+        .where('ownerId', isEqualTo: userId)
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => SharedTaskModel.fromFirestore(doc))
+            .toList());
+  }
+
+  // Search tasks
+  Future<List<TaskModel>> searchTasks(String userId, String query) async {
+    try {
+      final ownedTasks = await _tasksCollection
+          .where('ownerId', isEqualTo: userId)
+          .get();
+
+      final sharedTasks = await _tasksCollection
+          .where('sharedWith', arrayContains: userId)
+          .get();
+
+      final allTasks = [
+        ...ownedTasks.docs.map((doc) => TaskModel.fromFirestore(doc)),
+        ...sharedTasks.docs.map((doc) => TaskModel.fromFirestore(doc)),
+      ];
+
+      // Filter by search query
+      return allTasks.where((task) {
+        return task.title.toLowerCase().contains(query.toLowerCase()) ||
+               task.description.toLowerCase().contains(query.toLowerCase()) ||
+               task.tags.any((tag) => tag.toLowerCase().contains(query.toLowerCase()));
+      }).toList();
+    } catch (e) {
+      throw Exception('Failed to search tasks: $e');
+    }
+  }
+
+  // Batch operations for offline sync
+  Future<void> batchUpdateTasks(List<TaskModel> tasks) async {
+    try {
+      final batch = _firestore.batch();
+      
+      for (final task in tasks) {
+        final docRef = _tasksCollection.doc(task.id);
+        batch.update(docRef, task.toFirestore());
+      }
+      
+      await batch.commit();
+    } catch (e) {
+      throw Exception('Failed to batch update tasks: $e');
+    }
+  }
+
+  // Listen to task changes for real-time sync
+  Stream<TaskModel> getTaskStream(String taskId) {
+    return _tasksCollection
+        .doc(taskId)
+        .snapshots()
+        .map((doc) => TaskModel.fromFirestore(doc));
+  }
+
+  // Get analytics data
+  Future<Map<String, dynamic>> getTaskAnalytics(String userId) async {
+    try {
+      final ownedTasks = await _tasksCollection
+          .where('ownerId', isEqualTo: userId)
+          .get();
+
+      final sharedTasks = await _tasksCollection
+          .where('sharedWith', arrayContains: userId)
+          .get();
+
+      final allTasks = [
+        ...ownedTasks.docs.map((doc) => TaskModel.fromFirestore(doc)),
+        ...sharedTasks.docs.map((doc) => TaskModel.fromFirestore(doc)),
+      ];
+
+      final totalTasks = allTasks.length;
+      final completedTasks = allTasks.where((task) => task.isCompleted).length;
+      final overdueTasks = allTasks.where((task) => task.isOverdue).length;
+      final sharedTasksCount = sharedTasks.docs.length;
+
+      return {
+        'totalTasks': totalTasks,
+        'completedTasks': completedTasks,
+        'pendingTasks': totalTasks - completedTasks,
+        'overdueTasks': overdueTasks,
+        'sharedTasks': sharedTasksCount,
+        'completionRate': totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0,
+      };
+    } catch (e) {
+      throw Exception('Failed to get analytics: $e');
+    }
+  }
+}
