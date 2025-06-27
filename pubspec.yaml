@@ -1,0 +1,44 @@
+name: todo_app
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.7.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # State Management
+  provider: ^6.1.5
+  
+  # Firebase
+  firebase_core: ^3.14.0
+  cloud_firestore: ^5.6.9
+  firebase_auth: ^5.6.0
+  
+  # UI & Responsive
+  flutter_screenutil: ^5.9.3
+  
+  # Sharing & Communication
+  share_plus: ^11.0.0
+  url_launcher: ^6.3.1
+  qr_flutter: ^4.1.0
+  
+  # Utilities
+  uuid: ^4.5.1
+  intl: ^0.20.2
+  
+  # Infinite Scroll
+  infinite_scroll_pagination: ^4.0.0
+  
+  # Additional UI
+  flutter_staggered_animations: ^1.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
